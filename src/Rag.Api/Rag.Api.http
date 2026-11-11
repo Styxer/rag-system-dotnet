@@ -1,0 +1,29 @@
+@baseUrl = http://localhost:5080
+
+### Index a document
+POST {{baseUrl}}/api/documents
+Content-Type: application/json
+
+{
+  "fileName": "company-handbook.md",
+  "content": "Employees get 25 vacation days per year. Remote work is allowed up to three days a week. The office is closed on public holidays."
+}
+
+### Ask a question (vector search)
+POST {{baseUrl}}/api/query
+Content-Type: application/json
+
+{
+  "question": "How many vacation days do employees get?"
+}
+
+### Ask with hybrid search + LLM re-ranking
+POST {{baseUrl}}/api/query
+Content-Type: application/json
+
+{
+  "question": "Can I work from home?",
+  "topK": 3,
+  "useHybridSearch": true,
+  "useReranking": true
+}

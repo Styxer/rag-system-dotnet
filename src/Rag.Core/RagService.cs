@@ -4,13 +4,14 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Rag.Core.Generation;
 using Rag.Core.Retrieval;
+using Rag.Core.Security;
 using Rag.Core.Storage;
 
 namespace Rag.Core;
 
 public interface IRagService
 {
-    Task<RagResponse> AskAsync(string question, QueryOptions? options = null, CancellationToken cancellationToken = default);
+    Task<RagResponse> AskAsync(string question, AccessScope scope, QueryOptions? options = null, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -46,10 +47,12 @@ public sealed class RagService : IRagService
 
     public async Task<RagResponse> AskAsync(
         string question,
+        AccessScope scope,
         QueryOptions? options = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(question);
+        ArgumentNullException.ThrowIfNull(scope);
 
         var topK = options?.TopK ?? _options.TopK;
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
@@ -66,8 +69,9 @@ public sealed class RagService : IRagService
                 question,
                 candidateCount,
                 new HybridSearchWeights(_options.VectorWeight, _options.KeywordWeight),
+                scope,
                 cancellationToken)
-            : await _vectorStore.SearchAsync(queryEmbedding, candidateCount, cancellationToken);
+            : await _vectorStore.SearchAsync(queryEmbedding, candidateCount, scope, cancellationToken);
 
         // The threshold is a cosine similarity, so it only makes sense on plain vector results.
         if (!useHybrid && _options.MinimumScore > 0)

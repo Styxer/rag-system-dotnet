@@ -6,6 +6,7 @@ using Rag.Core.Indexing;
 using Rag.Core.Retrieval;
 using Rag.Core.Storage;
 using Rag.Testing;
+using Rag.Core.Security;
 
 namespace Rag.Core.Tests;
 
@@ -23,8 +24,8 @@ public class RagServiceTests
     {
         var indexer = new DocumentIndexer(
             new TextChunker(new ChunkingOptions { ChunkSize = 120, ChunkOverlap = 0 }), _embeddings, _store);
-        await indexer.IndexDocumentAsync(SampleDocuments.HandbookName, SampleDocuments.Handbook);
-        await indexer.IndexDocumentAsync(SampleDocuments.RecipesName, SampleDocuments.Recipes);
+        await indexer.IndexDocumentAsync(SampleDocuments.HandbookName, SampleDocuments.Handbook, AccessScope.Unrestricted);
+        await indexer.IndexDocumentAsync(SampleDocuments.RecipesName, SampleDocuments.Recipes, AccessScope.Unrestricted);
     }
 
     [Fact]
@@ -32,7 +33,7 @@ public class RagServiceTests
     {
         await IndexSamplesAsync();
 
-        var response = await CreateService().AskAsync("How many vacation days do employees receive per year?");
+        var response = await CreateService().AskAsync("How many vacation days do employees receive per year?", AccessScope.Unrestricted);
 
         Assert.Equal("Employees receive twenty five vacation days per year.", response.Answer);
         Assert.NotEmpty(response.Sources);
@@ -45,7 +46,7 @@ public class RagServiceTests
     {
         await IndexSamplesAsync();
 
-        await CreateService().AskAsync("How many vacation days do employees receive per year?");
+        await CreateService().AskAsync("How many vacation days do employees receive per year?", AccessScope.Unrestricted);
 
         var request = _chat.LastRequest;
         Assert.Equal(ChatRole.System, request[0].Role);
@@ -58,7 +59,7 @@ public class RagServiceTests
     [Fact]
     public async Task Ask_EmptyKnowledgeBase_ReturnsNoInformationWithoutCallingModel()
     {
-        var response = await CreateService().AskAsync("Anything?");
+        var response = await CreateService().AskAsync("Anything?", AccessScope.Unrestricted);
 
         Assert.Equal(PromptBuilder.NoInformationAnswer, response.Answer);
         Assert.Empty(response.Sources);
@@ -70,7 +71,7 @@ public class RagServiceTests
     {
         await IndexSamplesAsync();
 
-        var response = await CreateService(new RagOptions { TopK = 2 }).AskAsync("vacation");
+        var response = await CreateService(new RagOptions { TopK = 2 }).AskAsync("vacation", AccessScope.Unrestricted);
 
         Assert.Equal(2, response.Sources.Count);
         Assert.Equal(2, _store.LastTopK);
@@ -81,7 +82,7 @@ public class RagServiceTests
     {
         await IndexSamplesAsync();
 
-        var response = await CreateService(new RagOptions { TopK = 2 }).AskAsync("vacation", new QueryOptions(TopK: 1));
+        var response = await CreateService(new RagOptions { TopK = 2 }).AskAsync("vacation", AccessScope.Unrestricted, new QueryOptions(TopK: 1));
 
         Assert.Single(response.Sources);
     }
@@ -91,7 +92,7 @@ public class RagServiceTests
     {
         await IndexSamplesAsync();
 
-        await CreateService().AskAsync("vacation");
+        await CreateService().AskAsync("vacation", AccessScope.Unrestricted);
 
         Assert.Equal(1, _store.SearchCalls);
         Assert.Equal(0, _store.HybridCalls);
@@ -103,7 +104,7 @@ public class RagServiceTests
         await IndexSamplesAsync();
 
         await CreateService(new RagOptions { VectorWeight = 0.6, KeywordWeight = 0.4 })
-            .AskAsync("vacation", new QueryOptions(UseHybridSearch: true));
+            .AskAsync("vacation", AccessScope.Unrestricted, new QueryOptions(UseHybridSearch: true));
 
         Assert.Equal(0, _store.SearchCalls);
         Assert.Equal(1, _store.HybridCalls);
@@ -115,7 +116,7 @@ public class RagServiceTests
     {
         await IndexSamplesAsync();
 
-        await CreateService(new RagOptions { UseHybridSearchByDefault = true }).AskAsync("vacation");
+        await CreateService(new RagOptions { UseHybridSearchByDefault = true }).AskAsync("vacation", AccessScope.Unrestricted);
 
         Assert.Equal(1, _store.HybridCalls);
     }
@@ -126,7 +127,7 @@ public class RagServiceTests
         await IndexSamplesAsync();
 
         var response = await CreateService(new RagOptions { TopK = 2, RerankCandidateMultiplier = 3 })
-            .AskAsync("vacation", new QueryOptions(UseReranking: true));
+            .AskAsync("vacation", AccessScope.Unrestricted, new QueryOptions(UseReranking: true));
 
         Assert.Equal(6, _store.LastTopK);
         Assert.Equal(1, _reranker.CallCount);
@@ -139,7 +140,7 @@ public class RagServiceTests
     {
         await IndexSamplesAsync();
 
-        await CreateService().AskAsync("vacation");
+        await CreateService().AskAsync("vacation", AccessScope.Unrestricted);
 
         Assert.Equal(0, _reranker.CallCount);
     }
@@ -150,7 +151,7 @@ public class RagServiceTests
         await IndexSamplesAsync();
 
         var response = await CreateService(new RagOptions { MinimumScore = 0.99 })
-            .AskAsync("completely unrelated quantum chromodynamics");
+            .AskAsync("completely unrelated quantum chromodynamics", AccessScope.Unrestricted);
 
         Assert.Equal(PromptBuilder.NoInformationAnswer, response.Answer);
         Assert.Equal(0, _chat.CallCount);
@@ -163,7 +164,7 @@ public class RagServiceTests
 
         // The spy re-ranker would reverse the order, but nothing survives the threshold to reach it.
         var response = await CreateService(new RagOptions { MinimumScore = 0.99 })
-            .AskAsync("completely unrelated quantum chromodynamics", new QueryOptions(UseReranking: true));
+            .AskAsync("completely unrelated quantum chromodynamics", AccessScope.Unrestricted, new QueryOptions(UseReranking: true));
 
         Assert.Equal(PromptBuilder.NoInformationAnswer, response.Answer);
         Assert.Equal(0, _reranker.CallCount);
@@ -175,7 +176,7 @@ public class RagServiceTests
         await IndexSamplesAsync();
 
         var response = await CreateService(new RagOptions { MinimumScore = 0.99 })
-            .AskAsync("How many vacation days do employees receive per year?", new QueryOptions(UseHybridSearch: true));
+            .AskAsync("How many vacation days do employees receive per year?", AccessScope.Unrestricted, new QueryOptions(UseHybridSearch: true));
 
         Assert.NotEmpty(response.Sources);
         Assert.Equal(1, _chat.CallCount);
@@ -186,14 +187,42 @@ public class RagServiceTests
     [InlineData("   ")]
     public async Task Ask_EmptyQuestion_Throws(string question)
     {
-        await Assert.ThrowsAnyAsync<ArgumentException>(() => CreateService().AskAsync(question));
+        await Assert.ThrowsAnyAsync<ArgumentException>(() => CreateService().AskAsync(question, AccessScope.Unrestricted));
     }
 
     [Fact]
     public async Task Ask_InvalidTopK_Throws()
     {
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
-            () => CreateService().AskAsync("q", new QueryOptions(TopK: 0)));
+            () => CreateService().AskAsync("q", AccessScope.Unrestricted, new QueryOptions(TopK: 0)));
+    }
+
+    [Fact]
+    public async Task Ask_PassesTheCallersScopeToTheStore()
+    {
+        await IndexSamplesAsync();
+        var alice = AccessScope.ForUser("alice");
+
+        await CreateService().AskAsync("vacation", alice);
+
+        Assert.Same(alice, _store.LastScope);
+    }
+
+    [Fact]
+    public async Task Ask_OnlyUsesDocumentsTheCallerMayRead()
+    {
+        var alice = AccessScope.ForUser("alice");
+        var bob = AccessScope.ForUser("bob");
+        var indexer = new DocumentIndexer(
+            new TextChunker(new ChunkingOptions { ChunkSize = 120, ChunkOverlap = 0 }), _embeddings, _store);
+        await indexer.IndexDocumentAsync(SampleDocuments.HandbookName, SampleDocuments.Handbook, alice);
+
+        var forBob = await CreateService().AskAsync("How many vacation days do employees receive per year?", bob);
+        var forAlice = await CreateService().AskAsync("How many vacation days do employees receive per year?", alice);
+
+        Assert.Equal(PromptBuilder.NoInformationAnswer, forBob.Answer);
+        Assert.Empty(forBob.Sources);
+        Assert.NotEmpty(forAlice.Sources);
     }
 
     private sealed class SpyVectorStore : IVectorStore
@@ -204,26 +233,29 @@ public class RagServiceTests
         public int HybridCalls { get; private set; }
         public int LastTopK { get; private set; }
         public HybridSearchWeights? LastWeights { get; private set; }
+        public AccessScope? LastScope { get; private set; }
 
         public Task InitializeAsync(CancellationToken ct = default) => _inner.InitializeAsync(ct);
         public Task UpsertAsync(IReadOnlyCollection<VectorRecord> records, CancellationToken ct = default) => _inner.UpsertAsync(records, ct);
-        public Task<int> DeleteBySourceAsync(string source, CancellationToken ct = default) => _inner.DeleteBySourceAsync(source, ct);
-        public Task ReplaceSourceAsync(string source, IReadOnlyCollection<VectorRecord> records, CancellationToken ct = default) => _inner.ReplaceSourceAsync(source, records, ct);
+        public Task<int> DeleteBySourceAsync(string source, AccessScope scope, CancellationToken ct = default) => _inner.DeleteBySourceAsync(source, scope, ct);
+        public Task ReplaceSourceAsync(string source, IReadOnlyCollection<VectorRecord> records, AccessScope scope, CancellationToken ct = default) => _inner.ReplaceSourceAsync(source, records, scope, ct);
 
-        public Task<IReadOnlyList<SearchResult>> SearchAsync(ReadOnlyMemory<float> embedding, int topK, CancellationToken ct = default)
+        public Task<IReadOnlyList<SearchResult>> SearchAsync(ReadOnlyMemory<float> embedding, int topK, AccessScope scope, CancellationToken ct = default)
         {
             SearchCalls++;
             LastTopK = topK;
-            return _inner.SearchAsync(embedding, topK, ct);
+            LastScope = scope;
+            return _inner.SearchAsync(embedding, topK, scope, ct);
         }
 
         public Task<IReadOnlyList<SearchResult>> HybridSearchAsync(
-            ReadOnlyMemory<float> embedding, string text, int topK, HybridSearchWeights weights, CancellationToken ct = default)
+            ReadOnlyMemory<float> embedding, string text, int topK, HybridSearchWeights weights, AccessScope scope, CancellationToken ct = default)
         {
             HybridCalls++;
             LastTopK = topK;
             LastWeights = weights;
-            return _inner.HybridSearchAsync(embedding, text, topK, weights, ct);
+            LastScope = scope;
+            return _inner.HybridSearchAsync(embedding, text, topK, weights, scope, ct);
         }
     }
 

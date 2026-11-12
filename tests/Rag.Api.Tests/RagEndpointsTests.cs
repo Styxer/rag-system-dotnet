@@ -24,7 +24,7 @@ public class RagEndpointsTests
     public async Task IndexDocument_ValidRequest_ReturnsChunkCount()
     {
         await using var factory = new RagApiFactory();
-        var client = factory.CreateClient();
+        var client = factory.CreateClientAs("alice");
 
         var response = await client.PostAsJsonAsync("/api/documents",
             new IndexDocumentRequest(SampleDocuments.HandbookName, SampleDocuments.Handbook));
@@ -44,7 +44,7 @@ public class RagEndpointsTests
     public async Task IndexDocument_MissingFields_ReturnsBadRequest(string fileName, string content)
     {
         await using var factory = new RagApiFactory();
-        var client = factory.CreateClient();
+        var client = factory.CreateClientAs("alice");
 
         var response = await client.PostAsJsonAsync("/api/documents", new IndexDocumentRequest(fileName, content));
 
@@ -55,7 +55,7 @@ public class RagEndpointsTests
     public async Task Query_AfterIndexing_ReturnsGroundedAnswerWithSources()
     {
         await using var factory = new RagApiFactory();
-        var client = factory.CreateClient();
+        var client = factory.CreateClientAs("alice");
 
         await client.PostAsJsonAsync("/api/documents", new IndexDocumentRequest(SampleDocuments.HandbookName, SampleDocuments.Handbook));
         await client.PostAsJsonAsync("/api/documents", new IndexDocumentRequest(SampleDocuments.RecipesName, SampleDocuments.Recipes));
@@ -75,7 +75,7 @@ public class RagEndpointsTests
     public async Task Query_WithReranking_ReordersSourcesByModelScores()
     {
         await using var factory = new RagApiFactory();
-        var client = factory.CreateClient();
+        var client = factory.CreateClientAs("alice");
 
         await client.PostAsJsonAsync("/api/documents", new IndexDocumentRequest(SampleDocuments.HandbookName, SampleDocuments.Handbook));
         await client.PostAsJsonAsync("/api/documents", new IndexDocumentRequest(SampleDocuments.RecipesName, SampleDocuments.Recipes));
@@ -98,7 +98,7 @@ public class RagEndpointsTests
     public async Task IndexDocument_ContentOverLimit_ReturnsBadRequest()
     {
         await using var factory = new RagApiFactory();
-        var client = factory.CreateClient();
+        var client = factory.CreateClientAs("alice");
 
         var response = await client.PostAsJsonAsync("/api/documents",
             new IndexDocumentRequest("big.txt", new string('a', RagEndpoints.MaxContentLength + 1)));
@@ -111,7 +111,7 @@ public class RagEndpointsTests
     public async Task Query_EmptyKnowledgeBase_ReturnsNoInformationAnswer()
     {
         await using var factory = new RagApiFactory();
-        var client = factory.CreateClient();
+        var client = factory.CreateClientAs("alice");
 
         var response = await client.PostAsJsonAsync("/api/query", new QueryRequest("What is the meaning of life?"));
 
@@ -129,7 +129,7 @@ public class RagEndpointsTests
     public async Task Query_InvalidRequest_ReturnsBadRequest(string question, int? topK)
     {
         await using var factory = new RagApiFactory();
-        var client = factory.CreateClient();
+        var client = factory.CreateClientAs("alice");
 
         var response = await client.PostAsJsonAsync("/api/query", new QueryRequest(question, topK));
 

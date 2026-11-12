@@ -2,6 +2,7 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Rag.Core.Chunking;
+using Rag.Core.Security;
 using Rag.Core.Storage;
 
 namespace Rag.Core.Indexing;
@@ -10,7 +11,12 @@ public sealed record IndexingResult(string DocumentId, int ChunkCount);
 
 public interface IDocumentIndexer
 {
-    Task<IndexingResult> IndexDocumentAsync(string documentId, string content, CancellationToken cancellationToken = default);
+    Task<IndexingResult> IndexDocumentAsync(
+        string documentId,
+        string content,
+        AccessScope scope,
+        IReadOnlyCollection<string>? sharedWith = null,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -42,10 +48,16 @@ public sealed class DocumentIndexer : IDocumentIndexer
     public async Task<IndexingResult> IndexDocumentAsync(
         string documentId,
         string content,
+        AccessScope scope,
+        IReadOnlyCollection<string>? sharedWith = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(documentId);
         ArgumentException.ThrowIfNullOrWhiteSpace(content);
+        ArgumentNullException.ThrowIfNull(scope);
+
+        var owner = scope.OwnerPrincipal;
+        var acl = scope.BuildAcl(sharedWith);
 
         var chunks = _chunker.Chunk(documentId, content);
         var records = new List<VectorRecord>(chunks.Count);
@@ -61,10 +73,10 @@ public sealed class DocumentIndexer : IDocumentIndexer
                     $"Embedding generator returned {embeddings.Count} embeddings for {batch.Length} chunks.");
 
             records.AddRange(batch.Select((chunk, i) =>
-                new VectorRecord(chunk.Id, chunk.SourceId, chunk.Index, chunk.Text, embeddings[i].Vector)));
+                new VectorRecord(chunk.Id, chunk.SourceId, chunk.Index, chunk.Text, embeddings[i].Vector, owner, acl)));
         }
 
-        await _vectorStore.ReplaceSourceAsync(documentId, records, cancellationToken);
+        await _vectorStore.ReplaceSourceAsync(documentId, records, scope, cancellationToken);
 
         _logger.LogInformation("Indexed document {DocumentId} into {ChunkCount} chunks", documentId, records.Count);
         return new IndexingResult(documentId, records.Count);

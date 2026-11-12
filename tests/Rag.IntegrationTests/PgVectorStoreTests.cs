@@ -5,6 +5,7 @@ using Rag.Core.Storage;
 using Rag.Infrastructure;
 using Rag.Testing;
 using Testcontainers.PostgreSql;
+using Rag.Core.Security;
 
 namespace Rag.IntegrationTests;
 
@@ -82,7 +83,7 @@ public class PgVectorStoreTests : IClassFixture<PostgresFixture>
             new VectorRecord("far", "doc", 2, "far away", UnitVector(10)),
         ]);
 
-        var results = await store.SearchAsync(UnitVector(3), topK: 2);
+        var results = await store.SearchAsync(UnitVector(3), topK: 2, scope: AccessScope.Unrestricted);
 
         Assert.Equal(new[] { "exact", "near" }, results.Select(r => r.Id));
         Assert.Equal(1.0, results[0].Score, precision: 4);
@@ -96,7 +97,7 @@ public class PgVectorStoreTests : IClassFixture<PostgresFixture>
         await store.UpsertAsync([new VectorRecord("x", "doc", 0, "old", UnitVector(1))]);
         await store.UpsertAsync([new VectorRecord("x", "doc", 0, "new", UnitVector(2))]);
 
-        var result = Assert.Single(await store.SearchAsync(UnitVector(2), topK: 5));
+        var result = Assert.Single(await store.SearchAsync(UnitVector(2), topK: 5, scope: AccessScope.Unrestricted));
         Assert.Equal("new", result.Text);
         Assert.Equal(1.0, result.Score, precision: 4);
     }
@@ -112,10 +113,10 @@ public class PgVectorStoreTests : IClassFixture<PostgresFixture>
             new VectorRecord("b-0", "b", 0, "b zero", UnitVector(3)),
         ]);
 
-        var removed = await store.DeleteBySourceAsync("a");
+        var removed = await store.DeleteBySourceAsync("a", AccessScope.Unrestricted);
 
         Assert.Equal(2, removed);
-        var remaining = Assert.Single(await store.SearchAsync(UnitVector(1), topK: 10));
+        var remaining = Assert.Single(await store.SearchAsync(UnitVector(1), topK: 10, scope: AccessScope.Unrestricted));
         Assert.Equal("b", remaining.Source);
     }
 
@@ -130,9 +131,9 @@ public class PgVectorStoreTests : IClassFixture<PostgresFixture>
             new VectorRecord("b-0", "b", 0, "other", UnitVector(3)),
         ]);
 
-        await store.ReplaceSourceAsync("a", [new VectorRecord("a-0", "a", 0, "new zero", UnitVector(1))]);
+        await store.ReplaceSourceAsync("a", [new VectorRecord("a-0", "a", 0, "new zero", UnitVector(1))], AccessScope.Unrestricted);
 
-        var results = await store.SearchAsync(UnitVector(1), topK: 10);
+        var results = await store.SearchAsync(UnitVector(1), topK: 10, scope: AccessScope.Unrestricted);
         Assert.Equal(new[] { "new zero", "other" }, results.Select(r => r.Text).Order());
     }
 
@@ -144,9 +145,9 @@ public class PgVectorStoreTests : IClassFixture<PostgresFixture>
 
         // Wrong vector size makes the insert fail after the delete ran inside the same transaction.
         var wrongSize = new VectorRecord("a-0", "a", 0, "replacement", new float[Dimensions + 1]);
-        await Assert.ThrowsAnyAsync<NpgsqlException>(() => store.ReplaceSourceAsync("a", [wrongSize]));
+        await Assert.ThrowsAnyAsync<NpgsqlException>(() => store.ReplaceSourceAsync("a", [wrongSize], AccessScope.Unrestricted));
 
-        var survivor = Assert.Single(await store.SearchAsync(UnitVector(1), topK: 5));
+        var survivor = Assert.Single(await store.SearchAsync(UnitVector(1), topK: 5, scope: AccessScope.Unrestricted));
         Assert.Equal("original", survivor.Text);
     }
 
@@ -160,7 +161,7 @@ public class PgVectorStoreTests : IClassFixture<PostgresFixture>
             .ToList();
         await store.UpsertAsync(records);
 
-        var results = await store.SearchAsync(UnitVector(0, noise: 0.5f), topK: 55);
+        var results = await store.SearchAsync(UnitVector(0, noise: 0.5f), topK: 55, scope: AccessScope.Unrestricted);
 
         Assert.Equal(55, results.Count);
     }
@@ -187,8 +188,8 @@ public class PgVectorStoreTests : IClassFixture<PostgresFixture>
             new VectorRecord("keyword", "doc", 1, "Employees get twenty five vacation days", UnitVector(5, noise: 0.2f)),
         ]);
 
-        var vectorOnly = await store.SearchAsync(UnitVector(5), topK: 2);
-        var hybrid = await store.HybridSearchAsync(UnitVector(5), "vacation days", topK: 2, new HybridSearchWeights(0.5, 0.5));
+        var vectorOnly = await store.SearchAsync(UnitVector(5), topK: 2, scope: AccessScope.Unrestricted);
+        var hybrid = await store.HybridSearchAsync(UnitVector(5), "vacation days", topK: 2, new HybridSearchWeights(0.5, 0.5), scope: AccessScope.Unrestricted);
 
         Assert.Equal("semantic", vectorOnly[0].Id);
         Assert.Equal("keyword", hybrid[0].Id);
@@ -200,7 +201,7 @@ public class PgVectorStoreTests : IClassFixture<PostgresFixture>
         var store = await CreateStoreAsync();
         await store.UpsertAsync([new VectorRecord("only", "doc", 0, "nothing in common", UnitVector(7))]);
 
-        var results = await store.HybridSearchAsync(UnitVector(7), "zebra", topK: 3, HybridSearchWeights.Default);
+        var results = await store.HybridSearchAsync(UnitVector(7), "zebra", topK: 3, HybridSearchWeights.Default, scope: AccessScope.Unrestricted);
 
         var result = Assert.Single(results);
         // Rank 1 in the vector list only: the vector weight, on the 0..1 fused scale.
@@ -215,11 +216,11 @@ public class PgVectorStoreTests : IClassFixture<PostgresFixture>
         var indexer = new DocumentIndexer(
             new TextChunker(new ChunkingOptions { ChunkSize = 120, ChunkOverlap = 0 }), embeddings, store);
 
-        await indexer.IndexDocumentAsync(SampleDocuments.HandbookName, SampleDocuments.Handbook);
-        await indexer.IndexDocumentAsync(SampleDocuments.RecipesName, SampleDocuments.Recipes);
+        await indexer.IndexDocumentAsync(SampleDocuments.HandbookName, SampleDocuments.Handbook, AccessScope.Unrestricted);
+        await indexer.IndexDocumentAsync(SampleDocuments.RecipesName, SampleDocuments.Recipes, AccessScope.Unrestricted);
 
         var query = embeddings.Embed("How long do I cook the spaghetti pasta?");
-        var results = await store.SearchAsync(query, topK: 1);
+        var results = await store.SearchAsync(query, topK: 1, scope: AccessScope.Unrestricted);
 
         Assert.Equal(SampleDocuments.RecipesName, Assert.Single(results).Source);
     }

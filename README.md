@@ -91,15 +91,35 @@ dotnet run --project src/Rag.Api -- --VectorStore:Provider=InMemory
 
 ## API
 
+All routes except `/health` need a signed-in user (`Authorization: Bearer <jwt>`).
+
 | Method | Route | Body | Returns |
 |---|---|---|---|
-| `POST` | `/api/documents` | `{ fileName, content }` | `{ message, documentId, chunkCount }` |
+| `POST` | `/api/documents` | `{ fileName, content, allowedPrincipals? }` | `{ message, documentId, chunkCount }` |
 | `POST` | `/api/query` | `{ question, topK?, useHybridSearch?, useReranking? }` | `{ answer, sources[] }` |
-| `GET` | `/health` | none | `{ status }` |
+| `GET` | `/health` | none (anonymous) | `{ status }` |
 
-Invalid input returns `400` with `ProblemDetails`. Documents are limited to 1,000,000 characters.
+Status codes: `400` invalid input (`ProblemDetails`), `401` not signed in, `403` token has no `sub` claim, `409` the file name belongs to another owner, `429` rate limit hit (with `Retry-After`). Documents are limited to 1,000,000 characters and file names to 200.
 
-> **No authentication.** This is a demo API. Every upload and query costs OpenAI calls, so put it behind auth and rate limiting before exposing it beyond localhost.
+## Security
+
+**Sign-in.** The API validates JWTs from your identity provider. Set `Auth:Authority` (issuer URL) and `Auth:Audience`; outside Development the app refuses to start without an authority. The user id is the `sub` claim and groups come from the claim named in `Auth:GroupClaim` (default `groups`). For local work, create a token with the .NET tooling:
+
+```bash
+dotnet user-jwts create --project src/Rag.Api --claim groups=hr
+```
+
+**Per-document access control.** Every chunk stores an owner and an access list of principals (`user:<id>`, `group:<name>`). The list is applied *inside* the SQL search query, so text the caller may not read never reaches the prompt or the response. Every store and service method takes an `AccessScope` explicitly; there is no way to search without one.
+
+- A document is private to its uploader unless `allowedPrincipals` lists others (for example `["group:hr", "user:bob"]`). The uploader always keeps access.
+- The file name is the document id and belongs to whoever uploaded it first. Uploading the same name as someone else returns `409`; the owner can re-upload to replace the text or change the sharing.
+- Rows created before access control existed get the system owner and an empty list, so they are invisible to every user until re-indexed.
+- Filtering uses a GIN index on the access list. With pgvector 0.8+ the store enables iterative HNSW scans, so a filtered search still returns up to `topK` rows; older pgvector versions may return fewer when most nearby chunks are forbidden.
+- There is no endpoint yet to delete a document or change its sharing without re-uploading the content.
+
+**Rate limits.** Per user, per minute: `RateLimiting:QueryPerMinute` (30) and `RateLimiting:UploadPerMinute` (10). The counters live in memory, so with several instances each one counts separately; use a shared limiter (for example at the gateway) when you scale out.
+
+**Secrets.** The OpenAI key and connection string come from user-secrets or environment variables, never from the repository. A secret store such as Key Vault is deliberately not wired in: it adds a dependency and a cloud account this project does not require, and environment variables fed by your platform's secret store cover the same need.
 
 ## Configuration (`appsettings.json`)
 
@@ -115,6 +135,10 @@ Invalid input returns `400` with `ProblemDetails`. Documents are limited to 1,00
 | `Rag:TopK` | `5` | |
 | `Rag:VectorWeight` / `KeywordWeight` | `0.7` / `0.3` | hybrid (RRF) weights; tune for your data |
 | `Rag:RerankCandidateMultiplier` | `4` | re-ranking retrieves TopK × this many candidates |
+| `Auth:Authority` / `Auth:Audience` | (none) | Identity provider for JWT sign-in; Authority is required outside Development |
+| `Auth:GroupClaim` | `groups` | Token claim listing the caller's groups |
+| `Auth:RequireHttpsMetadata` | `true` | |
+| `RateLimiting:QueryPerMinute` / `UploadPerMinute` | `30` / `10` | Per user |
 | `Rag:MinimumScore` | `0` | Minimum cosine similarity, applied to vector search before re-ranking. 0 = off. Not applied to hybrid search (rank-based scores) |
 
 Package versions are pinned in one place: `Directory.Packages.props`.

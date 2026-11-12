@@ -1,17 +1,24 @@
 @baseUrl = http://localhost:5080
+# Create a local token first:
+#   dotnet user-jwts create --project src/Rag.Api --claim groups=hr
+# then paste it here.
+@token = <paste-token-here>
 
 ### Index a document
 POST {{baseUrl}}/api/documents
 Content-Type: application/json
+Authorization: Bearer {{token}}
 
 {
   "fileName": "company-handbook.md",
-  "content": "Employees get 25 vacation days per year. Remote work is allowed up to three days a week. The office is closed on public holidays."
+  "content": "Employees get 25 vacation days per year. Remote work is allowed up to three days a week. The office is closed on public holidays.",
+  "allowedPrincipals": ["group:hr"]
 }
 
 ### Ask a question (vector search)
 POST {{baseUrl}}/api/query
 Content-Type: application/json
+Authorization: Bearer {{token}}
 
 {
   "question": "How many vacation days do employees get?"
@@ -20,6 +27,7 @@ Content-Type: application/json
 ### Ask with hybrid search + LLM re-ranking
 POST {{baseUrl}}/api/query
 Content-Type: application/json
+Authorization: Bearer {{token}}
 
 {
   "question": "Can I work from home?",

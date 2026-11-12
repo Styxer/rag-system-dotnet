@@ -480,3 +480,8 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+# Local helper scripts (not part of the project)
+publish.cmd
+publish.ps1
+build-log.txt

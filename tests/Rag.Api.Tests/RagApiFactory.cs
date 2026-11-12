@@ -1,5 +1,7 @@
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -14,6 +16,11 @@ namespace Rag.Api.Tests;
 /// </summary>
 public sealed class RagApiFactory : WebApplicationFactory<Program>
 {
+    private readonly IReadOnlyDictionary<string, string?> _settings;
+
+    public RagApiFactory(IReadOnlyDictionary<string, string?>? settings = null) =>
+        _settings = settings ?? new Dictionary<string, string?>();
+
     /// <summary>Scores the fake model gives when asked to re-rank two candidates.</summary>
     public const string RerankReply = "[0.1, 0.9]";
 
@@ -33,6 +40,8 @@ public sealed class RagApiFactory : WebApplicationFactory<Program>
     {
         builder.UseEnvironment("Testing");
         builder.UseSetting("VectorStore:Provider", "InMemory");
+        foreach (var (key, value) in _settings)
+            builder.UseSetting(key, value);
 
         builder.ConfigureServices(services =>
         {
@@ -44,5 +53,24 @@ public sealed class RagApiFactory : WebApplicationFactory<Program>
             services.AddSingleton<IChatClient>(ChatClient);
             services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(EmbeddingGenerator);
         });
+
+        // Replace JWT sign-in with a header-driven test scheme; authorization rules stay the real ones.
+        builder.ConfigureTestServices(services =>
+            services.AddAuthentication(options =>
+            {
+                options.DefaultScheme = TestAuthHandler.Scheme;
+                options.DefaultAuthenticateScheme = TestAuthHandler.Scheme;
+                options.DefaultChallengeScheme = TestAuthHandler.Scheme;
+            }).AddScheme<AuthenticationSchemeOptions, TestAuthHandler>(TestAuthHandler.Scheme, _ => { }));
+    }
+
+    /// <summary>A client that is signed in as <paramref name="user"/> with the given groups.</summary>
+    public HttpClient CreateClientAs(string user, params string[] groups)
+    {
+        var client = CreateClient();
+        client.DefaultRequestHeaders.Add(TestAuthHandler.UserHeader, user);
+        if (groups.Length > 0)
+            client.DefaultRequestHeaders.Add(TestAuthHandler.GroupsHeader, string.Join(',', groups));
+        return client;
     }
 }

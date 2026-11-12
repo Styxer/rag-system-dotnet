@@ -1,4 +1,5 @@
 using Rag.Core.Storage;
+using Rag.Core.Security;
 
 namespace Rag.Core.Tests;
 
@@ -74,7 +75,7 @@ public class InMemoryVectorStoreTests
             Record("middle", "a", [1f, 1f]),
         ]);
 
-        var results = await store.SearchAsync(new float[] { 1f, 0f }, topK: 3);
+        var results = await store.SearchAsync(new float[] { 1f, 0f }, topK: 3, scope: AccessScope.Unrestricted);
 
         Assert.Equal(new[] { "close", "middle", "far" }, results.Select(r => r.Id));
         Assert.True(results[0].Score > results[1].Score);
@@ -86,7 +87,7 @@ public class InMemoryVectorStoreTests
         var store = new InMemoryVectorStore();
         await store.UpsertAsync(Enumerable.Range(0, 10).Select(i => Record($"r{i}", "a", [1f, i])).ToList());
 
-        var results = await store.SearchAsync(new float[] { 1f, 0f }, topK: 4);
+        var results = await store.SearchAsync(new float[] { 1f, 0f }, topK: 4, scope: AccessScope.Unrestricted);
 
         Assert.Equal(4, results.Count);
     }
@@ -97,13 +98,13 @@ public class InMemoryVectorStoreTests
     public async Task Search_InvalidTopK_Throws(int topK)
     {
         var store = new InMemoryVectorStore();
-        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.SearchAsync(new float[] { 1f }, topK));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.SearchAsync(new float[] { 1f }, topK, scope: AccessScope.Unrestricted));
     }
 
     [Fact]
     public async Task Search_EmptyStore_ReturnsEmpty()
     {
-        var results = await new InMemoryVectorStore().SearchAsync(new float[] { 1f, 0f }, 5);
+        var results = await new InMemoryVectorStore().SearchAsync(new float[] { 1f, 0f }, 5, scope: AccessScope.Unrestricted);
         Assert.Empty(results);
     }
 
@@ -114,7 +115,7 @@ public class InMemoryVectorStoreTests
         await store.UpsertAsync([Record("x", "a", [1f, 0f], "old")]);
         await store.UpsertAsync([Record("x", "a", [1f, 0f], "new")]);
 
-        var result = Assert.Single(await store.SearchAsync(new float[] { 1f, 0f }, 5));
+        var result = Assert.Single(await store.SearchAsync(new float[] { 1f, 0f }, 5, scope: AccessScope.Unrestricted));
         Assert.Equal("new", result.Text);
         Assert.Equal(1, store.Count);
     }
@@ -130,10 +131,10 @@ public class InMemoryVectorStoreTests
             Record("b-0", "b", [1f, 0f]),
         ]);
 
-        var removed = await store.DeleteBySourceAsync("a");
+        var removed = await store.DeleteBySourceAsync("a", AccessScope.Unrestricted);
 
         Assert.Equal(2, removed);
-        var remaining = Assert.Single(await store.SearchAsync(new float[] { 1f, 0f }, 5));
+        var remaining = Assert.Single(await store.SearchAsync(new float[] { 1f, 0f }, 5, scope: AccessScope.Unrestricted));
         Assert.Equal("b", remaining.Source);
     }
 
@@ -148,9 +149,9 @@ public class InMemoryVectorStoreTests
             Record("b-0", "b", [0f, 1f], "other"),
         ]);
 
-        await store.ReplaceSourceAsync("a", [Record("a-0", "a", [1f, 0f], "new zero")]);
+        await store.ReplaceSourceAsync("a", [Record("a-0", "a", [1f, 0f], "new zero")], AccessScope.Unrestricted);
 
-        var results = await store.SearchAsync(new float[] { 1f, 0f }, 10);
+        var results = await store.SearchAsync(new float[] { 1f, 0f }, 10, scope: AccessScope.Unrestricted);
         Assert.Equal(new[] { "new zero", "other" }, results.Select(r => r.Text));
     }
 
@@ -164,8 +165,8 @@ public class InMemoryVectorStoreTests
             Record("keyword", "b", [0.9f, 0.3f], "How many vacation days do employees get"),
         ]);
 
-        var vectorOnly = await store.SearchAsync(new float[] { 1f, 0f }, 2);
-        var hybrid = await store.HybridSearchAsync(new float[] { 1f, 0f }, "vacation days", 2, HybridSearchWeights.Default);
+        var vectorOnly = await store.SearchAsync(new float[] { 1f, 0f }, 2, scope: AccessScope.Unrestricted);
+        var hybrid = await store.HybridSearchAsync(new float[] { 1f, 0f }, "vacation days", 2, HybridSearchWeights.Default, scope: AccessScope.Unrestricted);
 
         Assert.Equal("semantic", vectorOnly[0].Id);
         Assert.Equal("keyword", hybrid[0].Id);

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
+using Rag.Core.Security;
 
 namespace Rag.Core.Storage;
 
@@ -12,7 +13,7 @@ public sealed partial class InMemoryVectorStore : IVectorStore
     private const int HybridCandidateMultiplier = 4;
 
     private readonly ConcurrentDictionary<string, VectorRecord> _records = new();
-    private readonly Lock _replaceLock = new();
+    private readonly Lock _writeLock = new();
 
     public int Count => _records.Count;
 
@@ -26,11 +27,19 @@ public sealed partial class InMemoryVectorStore : IVectorStore
         return Task.CompletedTask;
     }
 
-    public Task ReplaceSourceAsync(string source, IReadOnlyCollection<VectorRecord> records, CancellationToken cancellationToken = default)
+    public Task ReplaceSourceAsync(
+        string source,
+        IReadOnlyCollection<VectorRecord> records,
+        AccessScope scope,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(records);
-        lock (_replaceLock)
+        ArgumentNullException.ThrowIfNull(scope);
+
+        lock (_writeLock)
         {
+            OwnershipRules.EnsureCanReplace(scope, source, ExistingOwner(source), records);
+
             foreach (var (id, record) in _records)
             {
                 if (record.Source == source)
@@ -42,25 +51,34 @@ public sealed partial class InMemoryVectorStore : IVectorStore
         return Task.CompletedTask;
     }
 
-    public Task<int> DeleteBySourceAsync(string source, CancellationToken cancellationToken = default)
+    public Task<int> DeleteBySourceAsync(string source, AccessScope scope, CancellationToken cancellationToken = default)
     {
-        var removed = 0;
-        foreach (var (id, record) in _records)
+        ArgumentNullException.ThrowIfNull(scope);
+
+        lock (_writeLock)
         {
-            if (record.Source == source && _records.TryRemove(id, out _))
-                removed++;
+            OwnershipRules.EnsureCanDelete(scope, source, ExistingOwner(source));
+
+            var removed = 0;
+            foreach (var (id, record) in _records)
+            {
+                if (record.Source == source && _records.TryRemove(id, out _))
+                    removed++;
+            }
+            return Task.FromResult(removed);
         }
-        return Task.FromResult(removed);
     }
 
     public Task<IReadOnlyList<SearchResult>> SearchAsync(
         ReadOnlyMemory<float> queryEmbedding,
         int topK,
+        AccessScope scope,
         CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
+        ArgumentNullException.ThrowIfNull(scope);
 
-        IReadOnlyList<SearchResult> results = _records.Values
+        IReadOnlyList<SearchResult> results = Visible(scope)
             .Select(r => ToResult(r, VectorMath.CosineSimilarity(queryEmbedding.Span, r.Embedding.Span)))
             .OrderByDescending(r => r.Score)
             .ThenBy(r => r.Id, StringComparer.Ordinal)
@@ -75,14 +93,16 @@ public sealed partial class InMemoryVectorStore : IVectorStore
         string queryText,
         int topK,
         HybridSearchWeights weights,
+        AccessScope scope,
         CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
         ArgumentNullException.ThrowIfNull(weights);
+        ArgumentNullException.ThrowIfNull(scope);
 
         var pool = topK * HybridCandidateMultiplier;
         var queryTerms = Tokenize(queryText).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var records = _records.Values.ToList();
+        var records = Visible(scope).ToList();
 
         var vectorRanks = records
             .Select(r => (r.Id, Score: VectorMath.CosineSimilarity(queryEmbedding.Span, r.Embedding.Span)))
@@ -113,6 +133,12 @@ public sealed partial class InMemoryVectorStore : IVectorStore
 
         return Task.FromResult(results);
     }
+
+    private IEnumerable<VectorRecord> Visible(AccessScope scope) =>
+        _records.Values.Where(r => scope.CanRead(r.AllowedPrincipals));
+
+    private string? ExistingOwner(string source) =>
+        _records.Values.FirstOrDefault(r => r.Source == source)?.Owner;
 
     /// <summary>Fraction of distinct query terms that appear in the text (0..1).</summary>
     internal static double KeywordScore(IReadOnlySet<string> queryTerms, string text)

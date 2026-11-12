@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Npgsql;
 using Pgvector;
+using Rag.Core.Security;
 using Rag.Core.Storage;
 
 namespace Rag.Infrastructure;
@@ -47,14 +48,16 @@ public sealed class PgVectorStore : IVectorStore
             throw new ArgumentException($"Invalid text search config '{options.TextSearchConfig}'.");
 
         _upsertSql = $"""
-            INSERT INTO {_table} (id, source, chunk_index, text, embedding, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+            INSERT INTO {_table} (id, source, chunk_index, text, embedding, metadata, owner, acl)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
             ON CONFLICT (id) DO UPDATE SET
                 source = EXCLUDED.source,
                 chunk_index = EXCLUDED.chunk_index,
                 text = EXCLUDED.text,
                 embedding = EXCLUDED.embedding,
-                metadata = EXCLUDED.metadata;
+                metadata = EXCLUDED.metadata,
+                owner = EXCLUDED.owner,
+                acl = EXCLUDED.acl;
             """;
     }
 
@@ -82,6 +85,14 @@ public sealed class PgVectorStore : IVectorStore
 
             CREATE INDEX IF NOT EXISTS {IndexName("source")}
                 ON {_table} (source);
+
+            -- Access control. Rows that existed before these columns get the system owner and an
+            -- empty list, so they stay invisible to every user until re-indexed.
+            ALTER TABLE {_table} ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT '{AccessScope.SystemOwnerPrincipal}';
+            ALTER TABLE {_table} ADD COLUMN IF NOT EXISTS acl TEXT[] NOT NULL DEFAULT '{"{}"}'::text[];
+
+            CREATE INDEX IF NOT EXISTS {IndexName("acl_gin")}
+                ON {_table} USING gin (acl);
             """;
 
         await using (var cmd = _dataSource.CreateCommand(sql))
@@ -127,10 +138,21 @@ public sealed class PgVectorStore : IVectorStore
         await batch.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    public async Task ReplaceSourceAsync(string source, IReadOnlyCollection<VectorRecord> records, CancellationToken cancellationToken = default)
+    public async Task ReplaceSourceAsync(
+        string source,
+        IReadOnlyCollection<VectorRecord> records,
+        AccessScope scope,
+        CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(records);
+        ArgumentNullException.ThrowIfNull(scope);
+
         await using var conn = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var tx = await conn.BeginTransactionAsync(cancellationToken);
+
+        // Serialize writers of the same document so two first-time uploads cannot both claim it.
+        var existingOwner = await LockAndGetOwnerAsync(conn, tx, source, cancellationToken);
+        OwnershipRules.EnsureCanReplace(scope, source, existingOwner, records);
 
         // Delete + insert in one transaction: if anything fails, the old chunks stay.
         await using var batch = new NpgsqlBatch(conn, tx);
@@ -143,33 +165,71 @@ public sealed class PgVectorStore : IVectorStore
         await tx.CommitAsync(cancellationToken);
     }
 
-    public async Task<int> DeleteBySourceAsync(string source, CancellationToken cancellationToken = default)
+    public async Task<int> DeleteBySourceAsync(string source, AccessScope scope, CancellationToken cancellationToken = default)
     {
-        await using var cmd = _dataSource.CreateCommand($"DELETE FROM {_table} WHERE source = $1");
-        cmd.Parameters.Add(new NpgsqlParameter { Value = source });
-        return await cmd.ExecuteNonQueryAsync(cancellationToken);
+        ArgumentNullException.ThrowIfNull(scope);
+
+        await using var conn = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var tx = await conn.BeginTransactionAsync(cancellationToken);
+
+        var existingOwner = await LockAndGetOwnerAsync(conn, tx, source, cancellationToken);
+        OwnershipRules.EnsureCanDelete(scope, source, existingOwner);
+
+        int removed;
+        await using (var cmd = new NpgsqlCommand($"DELETE FROM {_table} WHERE source = $1", conn, tx))
+        {
+            cmd.Parameters.Add(new NpgsqlParameter { Value = source });
+            removed = await cmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await tx.CommitAsync(cancellationToken);
+        return removed;
+    }
+
+    /// <summary>Takes a transaction-scoped advisory lock on the document id, then returns its current owner (null if new).</summary>
+    private async Task<string?> LockAndGetOwnerAsync(
+        NpgsqlConnection conn,
+        NpgsqlTransaction tx,
+        string source,
+        CancellationToken cancellationToken)
+    {
+        await using (var lockCmd = new NpgsqlCommand("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", conn, tx))
+        {
+            lockCmd.Parameters.Add(new NpgsqlParameter { Value = source });
+            await lockCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using var ownerCmd = new NpgsqlCommand($"SELECT owner FROM {_table} WHERE source = $1 LIMIT 1", conn, tx);
+        ownerCmd.Parameters.Add(new NpgsqlParameter { Value = source });
+        return await ownerCmd.ExecuteScalarAsync(cancellationToken) as string;
     }
 
     public Task<IReadOnlyList<SearchResult>> SearchAsync(
         ReadOnlyMemory<float> queryEmbedding,
         int topK,
+        AccessScope scope,
         CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
+        ArgumentNullException.ThrowIfNull(scope);
+
+        var filtered = !scope.IsUnrestricted;
 
         // <=> is cosine distance; similarity = 1 - distance.
+        // The access filter lives in the query itself, so no unreadable chunk is ever fetched.
         var sql = $"""
             SELECT id, source, chunk_index, text, 1 - (embedding <=> $1) AS score
             FROM {_table}
+            {(filtered ? "WHERE acl && $3" : "")}
             ORDER BY embedding <=> $1
             LIMIT $2;
             """;
 
-        return QueryAsync(
-            sql,
-            candidateLimit: topK,
-            [new Vector(queryEmbedding), topK],
-            cancellationToken);
+        var parameters = filtered
+            ? new object[] { new Vector(queryEmbedding), topK, scope.Principals.ToArray() }
+            : new object[] { new Vector(queryEmbedding), topK };
+
+        return QueryAsync(sql, candidateLimit: topK, filtered, parameters, cancellationToken);
     }
 
     public Task<IReadOnlyList<SearchResult>> HybridSearchAsync(
@@ -177,10 +237,15 @@ public sealed class PgVectorStore : IVectorStore
         string queryText,
         int topK,
         HybridSearchWeights weights,
+        AccessScope scope,
         CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
         ArgumentNullException.ThrowIfNull(weights);
+        ArgumentNullException.ThrowIfNull(scope);
+
+        var filtered = !scope.IsUnrestricted;
+        var aclAnd = filtered ? "AND acl && $7" : "";
 
         // Weighted Reciprocal Rank Fusion: each side ranks its own candidates, and a chunk scores
         // weight / (60 + rank) per list it appears in. Only ranks are combined, never raw scores,
@@ -191,6 +256,7 @@ public sealed class PgVectorStore : IVectorStore
                 FROM (
                     SELECT id, embedding <=> $1 AS distance
                     FROM {_table}
+                    WHERE TRUE {aclAnd}
                     ORDER BY distance
                     LIMIT $3
                 ) nearest
@@ -200,7 +266,7 @@ public sealed class PgVectorStore : IVectorStore
                 FROM (
                     SELECT id, ts_rank(search_vector, plainto_tsquery('{_options.TextSearchConfig}', $2)) AS keyword_rank
                     FROM {_table}
-                    WHERE search_vector @@ plainto_tsquery('{_options.TextSearchConfig}', $2)
+                    WHERE search_vector @@ plainto_tsquery('{_options.TextSearchConfig}', $2) {aclAnd}
                     ORDER BY keyword_rank DESC
                     LIMIT $3
                 ) matched
@@ -218,11 +284,12 @@ public sealed class PgVectorStore : IVectorStore
         var pool = topK * HybridCandidateMultiplier;
         var scale = weights.Scale;
 
-        return QueryAsync(
-            sql,
-            candidateLimit: pool,
-            [new Vector(queryEmbedding), queryText, pool, weights.VectorWeight * scale, weights.KeywordWeight * scale, topK],
-            cancellationToken);
+        List<object> parameters =
+            [new Vector(queryEmbedding), queryText, pool, weights.VectorWeight * scale, weights.KeywordWeight * scale, topK];
+        if (filtered)
+            parameters.Add(scope.Principals.ToArray());
+
+        return QueryAsync(sql, candidateLimit: pool, filtered, parameters.ToArray(), cancellationToken);
     }
 
     /// <summary>
@@ -233,6 +300,7 @@ public sealed class PgVectorStore : IVectorStore
     private async Task<IReadOnlyList<SearchResult>> QueryAsync(
         string sql,
         int candidateLimit,
+        bool filtered,
         object[] parameters,
         CancellationToken cancellationToken)
     {
@@ -243,6 +311,12 @@ public sealed class PgVectorStore : IVectorStore
         var efSearch = Math.Clamp(candidateLimit, DefaultEfSearch, MaxEfSearch);
         await using (var set = new NpgsqlCommand($"SET LOCAL hnsw.ef_search = {efSearch}", conn, tx))
             await set.ExecuteNonQueryAsync(cancellationToken);
+
+        // With a filter, an HNSW scan can run out of matching rows before reaching the limit.
+        // pgvector 0.8+ can keep scanning (iterative scan); older versions reject the setting,
+        // so try it inside a savepoint and carry on without it.
+        if (filtered)
+            await TryEnableIterativeScanAsync(conn, tx, cancellationToken);
 
         var results = new List<SearchResult>();
         await using (var cmd = new NpgsqlCommand(sql, conn, tx))
@@ -266,6 +340,24 @@ public sealed class PgVectorStore : IVectorStore
         return results;
     }
 
+    private static async Task TryEnableIterativeScanAsync(
+        NpgsqlConnection conn,
+        NpgsqlTransaction tx,
+        CancellationToken cancellationToken)
+    {
+        await tx.SaveAsync("iterative_scan", cancellationToken);
+        try
+        {
+            await using var cmd = new NpgsqlCommand("SET LOCAL hnsw.iterative_scan = strict_order", conn, tx);
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
+            await tx.ReleaseAsync("iterative_scan", cancellationToken);
+        }
+        catch (PostgresException)
+        {
+            await tx.RollbackAsync("iterative_scan", cancellationToken);
+        }
+    }
+
     private void AddUpsertCommands(NpgsqlBatch batch, IReadOnlyCollection<VectorRecord> records)
     {
         foreach (var record in records)
@@ -280,6 +372,8 @@ public sealed class PgVectorStore : IVectorStore
             {
                 Value = JsonSerializer.Serialize(new { source = record.Source, chunkIndex = record.ChunkIndex })
             });
+            command.Parameters.Add(new NpgsqlParameter { Value = record.Owner });
+            command.Parameters.Add(new NpgsqlParameter { Value = (record.AllowedPrincipals ?? []).ToArray() });
             batch.BatchCommands.Add(command);
         }
     }
